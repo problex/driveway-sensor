@@ -10,10 +10,13 @@
 #include <Wire.h>
 #include <Adafruit_Sensor.h>
 #include <Adafruit_BME280.h>
+#include <Adafruit_INA219.h>
+
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
 
 Adafruit_BME280 bme;
+Adafruit_INA219 ina219;
 
 //OTA includes
 #include <ESPmDNS.h>
@@ -79,6 +82,7 @@ StaticJsonBuffer<512> jsonBuffer;
 
 
 void setup() {
+  setCpuFrequencyMhz(80);
   Serial.begin(115200);
   // default settings
   // (you can also pass in a Wire library object like &Wire2)
@@ -105,6 +109,22 @@ void setup() {
 
   client.setServer(mqtt_server, 1883);
   client.setCallback(callback);
+
+  uint32_t currentFrequency;
+ 
+  // Initialize the INA219.
+  // By default the initialization will use the largest range (32V, 2A).  However
+  // you can call a setCalibration function to change this range (see comments).
+  if (! ina219.begin()) {
+    Serial.println("Failed to find INA219 chip");
+    while (1) { delay(10); }
+  }
+  // To use a slightly lower 32V, 1A range (higher precision on amps):
+  //ina219.setCalibration_32V_1A();
+  // Or to use a lower 16V, 400mA range (higher precision on volts and amps):
+  //ina219.setCalibration_16V_400mA();
+
+  Serial.println("Measuring voltage and current with INA219 ...");
 
   delay(1000);
 
@@ -223,20 +243,23 @@ void reconnect() {
     if (client.connect("ESP32Client",MQTT_USER,MQTT_PASSWD)) {
       Serial.println("connected");
       // Subscribe
+      /*
       client.subscribe("esp32/driveway/valve1");
       client.subscribe("esp32/driveway/valve2");
       client.subscribe("esp32/driveway/valve3");            
       client.subscribe("esp32/driveway/valve4");
+      */
     } else {
       Serial.print("failed, rc=");
       Serial.print(client.state());
       Serial.println(" try again in 5 seconds");
       // Wait 5 seconds before retrying
-
-  Serial.println("");
-  Serial.println("WiFi connected");
-  Serial.println("IP address: ");
-  Serial.println(WiFi.localIP());
+      // first try reconnect to the ap
+      WiFi.reconnect ();
+      Serial.println("");
+      Serial.println("WiFi connected");
+      Serial.println("IP address: ");
+      Serial.println(WiFi.localIP());
       delay(5000);
     }
   }
@@ -264,14 +287,14 @@ void loop() {
     if (buttonState == HIGH) {
       // if the current state is HIGH then the button went from off to on:
       buttonPushCounter++;
-      Serial.println("on");
+      //Serial.println("on");
       client.publish("esp32/driveway/motion", "on");
  
-      Serial.print("number of button pushes: ");
-      Serial.println(buttonPushCounter);
+      //Serial.print("number of button pushes: ");
+      //Serial.println(buttonPushCounter);
     } else {
       // if the current state is LOW then the button went from on to off:
-      Serial.println("off");
+      //Serial.println("off");
       client.publish("esp32/driveway/motion", "off");      
     }
     // Delay a little bit to avoid bouncing
@@ -281,13 +304,48 @@ void loop() {
   lastButtonState = buttonState;
   
   long now = millis();
-  if (now - lastMsg > 30000) {
+  if (now - lastMsg > 600000) {
     lastMsg = now;
+
+    // set floats required for reading voltage and current
+    float shuntvoltage = 0;
+    float busvoltage = 0;
+    float current_mA = 0;
+    float loadvoltage = 0;
+    float power_mW = 0;
+    // read the values from the sensor board
+    shuntvoltage = ina219.getShuntVoltage_mV();
+    busvoltage = ina219.getBusVoltage_V();
+    current_mA = ina219.getCurrent_mA();
+    power_mW = ina219.getPower_mW();
+    loadvoltage = busvoltage + (shuntvoltage / 1000);
+    /*
+    Serial.print("Bus Voltage:   "); Serial.print(busvoltage); Serial.println(" V");
+    Serial.print("Shunt Voltage: "); Serial.print(shuntvoltage); Serial.println(" mV");
+    Serial.print("Load Voltage:  "); Serial.print(loadvoltage); Serial.println(" V");
+    Serial.print("Current:       "); Serial.print(current_mA); Serial.println(" mA");
+    Serial.print("Power:         "); Serial.print(power_mW); Serial.println(" mW");
+    Serial.println("");
+    */
+    // publish the vales to the mqtt server
+    char volString[8];    
+    dtostrf(loadvoltage, 1, 2, volString);    
+    client.publish("esp32/driveway/voltage", volString);
+    
+    char currentString[8];    
+    dtostrf(current_mA, 1, 2, currentString);    
+    client.publish("esp32/driveway/current", currentString);
+    
+    char powerString[8];    
+    dtostrf(power_mW, 6, 0, powerString);    
+    client.publish("esp32/driveway/power", powerString);
     
     // Read Humidity
+    /*    
     Serial.print("Humidity = ");
     Serial.print(bme.readHumidity());
     Serial.println("%");
+    */
     humidity = bme.readHumidity();
     
     char humiString[8];
@@ -304,12 +362,15 @@ void loop() {
       // Convert the value to a char array
       char tempString[8];
       dtostrf(temperature, 1, 2, tempString);
-    
+      client.publish("esp32/driveway/temp", tempString);      
+    /*      
       Serial.print("Temperature = ");
       Serial.print(tempString);
-      client.publish("esp32/driveway/temp", tempString);
       Serial.println(" *C");
+    */   
+   
     }
+    
     pressure = bme.readPressure();
 
     if (pressure < 120000) {
@@ -317,23 +378,11 @@ void loop() {
       // Convert the value to a char array
       char preString[8];
       dtostrf(pressure, 6, 0, preString);
+      client.publish("esp32/driveway/pressure", preString);
+      /*     
       Serial.print("Pressure = ");
       Serial.println(preString);
-      client.publish("esp32/driveway/pressure", preString);
+      */               
     }
-    ADC_VALUE = analogRead(Analog_channel_pin);
-    Serial.print("ADC VALUE = ");
-    Serial.println(ADC_VALUE);
-    delay(1000);
-    voltage_value = (ADC_VALUE * 3.3 ) / (4395) ;
-    vin = voltage_value / (R2/(R1+R2)) ; 
-    Serial.print("Voltage = ");
-    Serial.print(voltage_value);
-    Serial.print("volts");
-    char volString[8];    
-    dtostrf(vin, 6, 0, volString);    
-    client.publish("esp32/driveway/voltage", volString);
-}    
-
-
+  }    
 }
